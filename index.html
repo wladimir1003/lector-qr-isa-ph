@@ -13,17 +13,65 @@ const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'
 const slug=s=>norm(s).replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,70)||'sin_nombre';
 const col=s=>norm(s).replace(/[^a-z0-9]/g,'');
 let records=[],headers=[];
+
+// Contrato compartido QR V2: identificador exacto, no datos de aprobación en el QR.
+function qrPayload(p){return 'QRISA2|'+(p.rut?'RUT':'ITEM')+'|'+key(p.rut||p.item);}
+function parseQrPayload(raw){
+ const s=String(raw||'').trim(),m=/^QRISA2\|(RUT|ITEM)\|([0-9A-Z]+)$/i.exec(s);
+ if(m)return {type:m[1].toUpperCase(), value:key(m[2]), version:2};
+ return {type:'LEGACY',value:key(s),version:1};
+}
+
+let sourceMode="none",lastSync=0,syncPromise=null;
 function csvParse(t){t=String(t).replace(/^\uFEFF/,'');let rows=[],row=[],field='',quote=false;for(let i=0;i<t.length;i++){let c=t[i];if(quote){if(c==='"'&&t[i+1]==='"'){field+='"';i++;}else if(c==='"')quote=false;else field+=c;}else if(c==='"')quote=true;else if(c===','||c===';'&&t.slice(0,t.indexOf('\n')).includes(';')&&!t.slice(0,t.indexOf('\n')).includes(',')){row.push(field);field='';}else if(c==='\n'){row.push(field);rows.push(row);row=[];field='';}else if(c!=='\r')field+=c;}if(field||row.length){row.push(field);rows.push(row);}return rows;}
 function loadRows(rows){rows=rows.filter(r=>r.some(c=>String(c??'').trim()));if(!rows.length)throw Error('La planilla está vacía.');headers=rows.shift().map(s=>String(s??'').trim());const ci=(...names)=>headers.findIndex(h=>names.some(n=>col(h)===col(n)));
 const idx={name:ci('Nombres','Nombre','Primer nombre'),last:ci('Apellidos','Apellido'),rut:ci('RUT','RUN'),item:ci('Item','N° Item','Nº Item','Numero','Número','ID'),job:ci('Cargo'),company:ci('Empresa')};if(idx.name<0&&idx.last<0)throw Error('No existe la columna Nombres o Apellidos. Encabezados detectados: '+headers.join(', '));
 records=rows.map((r,i)=>{const g=j=>j<0?'':String(r[j]??'').trim();const name=[g(idx.name),g(idx.last)].filter(Boolean).join(' ');const rut=g(idx.rut),item=g(idx.item),code=rut||item;return{name,rut,item,code,job:g(idx.job),company:g(idx.company),values:r,index:i+1,search:norm([name,rut,item,g(idx.job),g(idx.company)].join(' '))+' '+key(rut)+' '+key(item)}}).filter(p=>p.name&&p.code);
-if(!records.length)throw Error('La planilla no contiene personas con nombre y RUT o Item.');onDataLoaded();}
+if(!records.length)throw Error('La planilla no contiene personas con nombre y RUT o Item.');
+ const seenKeys=new Set(),duplicates=[];
+ for(const p of records){const id=qrPayload(p);if(seenKeys.has(id))duplicates.push(id);seenKeys.add(id);}
+ if(duplicates.length)throw Error('Hay identificadores QR duplicados en la planilla: '+duplicates.slice(0,5).join(', ')+'. Corrige la planilla antes de emitir QR.');
+ onDataLoaded();}
 function setStatus(t,kind=''){const e=$('status');e.textContent=t;e.className='status '+kind;const b=$('open-direct');if(b)b.style.display= (kind==='error' && (/iframe|incrustad|página anfitriona|marco|política de permisos/i.test(t)))?'inline-block':'none';}
-async function loadFile(file){if(!file)return;try{setStatus('Leyendo '+file.name+'…');let rows;if(/\.json$/i.test(file.name)){const obj=JSON.parse(await file.text());if(!Array.isArray(obj.headers)||!Array.isArray(obj.rows))throw Error('El JSON no tiene estructura de respaldo QR válida.');rows=[obj.headers,...obj.rows];}else if(/\.csv$/i.test(file.name))rows=csvParse(await file.text());else{if(typeof XLSX==='undefined')throw Error('No se cargó la biblioteca de Excel; usa un archivo CSV o revisa la conexión.');const w=XLSX.read(await file.arrayBuffer(),{type:'array',raw:false});const sheet=w.Sheets[w.SheetNames[0]];rows=XLSX.utils.sheet_to_json(sheet,{header:1,defval:'',raw:false});}loadRows(rows);}catch(e){setStatus('Error de importación: '+e.message,'error');}}
+async function loadFile(file){if(!file)return;try{setStatus('Leyendo '+file.name+'…');let rows;if(/\.json$/i.test(file.name)){const obj=JSON.parse(await file.text());if(!Array.isArray(obj.headers)||!Array.isArray(obj.rows))throw Error('El JSON no tiene estructura de respaldo QR válida.');rows=[obj.headers,...obj.rows];}else if(/\.csv$/i.test(file.name))rows=csvParse(await file.text());else{if(typeof XLSX==='undefined')throw Error('No se cargó la biblioteca de Excel; usa un archivo CSV o revisa la conexión.');const w=XLSX.read(await file.arrayBuffer(),{type:'array',raw:false});const sheet=w.Sheets[w.SheetNames[0]];rows=XLSX.utils.sheet_to_json(sheet,{header:1,defval:'',raw:false});}sourceMode='local';lastSync=0;loadRows(rows);}catch(e){setStatus('Error de importación: '+e.message,'error');}}
 // Versión independiente: requiere respaldo de datos. No publica ni solicita la nómina en abierto.
+
+// Servicio Apps Script: URL privada de CONFIGURACION en el código, nunca se muestra en pantalla.
+// IMPORTANTE: la opción JSONP requiere que la fuente esté autorizada para publicación.
+const API_URL = 'PEGAR_AQUI_URL_DEL_DESPLIEGUE_APPS_SCRIPT_EXEC';
+function apiConfigured(){return /^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(?:\?.*)?$/.test(API_URL);}
+function fetchRowsJSONP(){return new Promise((resolve,reject)=>{
+ const cb='qrEndpointCallback_'+Math.random().toString(36).slice(2,13), sc=document.createElement('script');
+ let done=false;
+ const timer=setTimeout(()=>finish(Error('Tiempo agotado conectando a Apps Script')),18000);
+ function finish(err,data){if(done)return;done=true;clearTimeout(timer);sc.remove();delete window[cb];err?reject(err):resolve(data);}
+ window[cb]=data=>finish(null,data);
+ sc.onerror=()=>finish(Error('El servicio Apps Script no responde. Revisa la implementación y URL /exec.'));
+ sc.src=API_URL+(API_URL.includes('?')?'&':'?')+'callback='+cb+'&t='+Date.now();
+ document.head.appendChild(sc);
+});}
+async function syncData(force=false){
+ if(!apiConfigured()){setStatus('Sin servicio conectado. Configura API_URL en el HTML e instala el script; también puedes importar un respaldo manual.', 'error');return false;}
+ if(syncPromise)return syncPromise;
+ if(!force&&sourceMode==='online'&&Date.now()-lastSync<30000)return true;
+ syncPromise=(async()=>{
+  try{
+   setStatus('Actualizando datos desde Google Sheets…');
+   const response=await fetchRowsJSONP();
+   if(response?.error)throw Error(response.error);
+   if(!Array.isArray(response?.rows))throw Error('El servicio no devolvió filas de planilla.');
+   loadRows(response.rows);
+   sourceMode='online';lastSync=Date.now();
+   setStatus('Sincronizado: '+records.length+' personas. Última consulta: '+new Date(lastSync).toLocaleTimeString('es-CL')+'.','good');
+   return true;
+  }catch(e){sourceMode='error';lastSync=0;setStatus('No se pudo sincronizar: '+e.message+'. No se puede confirmar aprobación en vivo.','error');return false;}
+  finally{syncPromise=null;}
+ })();return syncPromise;
+}
+
 function initSource(){
  $('file').addEventListener('change', e => loadFile(e.target.files[0]));
- setStatus('Carga el respaldo Excel / CSV / JSON desde «Importar respaldo» para consultar ISA y PH. La cámara se puede usar sin cargar datos.');
+ if(apiConfigured())syncData(true);else setStatus('Configura API_URL para consultar Google Sheets. Como respaldo puedes importar Excel/CSV/JSON.','error');
 }
 function statusText(v){const s=norm(v);if(!s)return 'Sin información';if(/^(si|s|aprobado|aprobada|apto|apta|vigente|realizada|realizado|completada|completado|cumple|ok|true|1|ap)$/.test(s))return 'Aprobado';if(/^(no|n|reprobado|reprobada|no aprobado|no aprobada|pendiente|vencida|vencido|no cumple|incompleta|incompleto|false|0)$/.test(s))return 'No aprobado';return String(v).trim();}
 function statusClass(s){return s==='Aprobado'?'approved':s==='No aprobado'?'rejected':'unknown';}
@@ -33,15 +81,36 @@ function downloadBlob(blob,name){const url=URL.createObjectURL(blob);const a=doc
 
 
 let scanner=null,isScanning=false,seen='',seenAt=0;
-function onDataLoaded(){setStatus(records.length+' personas disponibles para consulta. ISA y PH se verifican con las columnas de la planilla.','good');}
+function onDataLoaded(){setStatus(records.length+' personas disponibles. '+(sourceMode==='local'?'RESPALDO LOCAL: puede estar desactualizado.':'Datos cargados; verificar origen.'),'good');}
 function detail(p){const t=getTraining(p);const tag=(label,entry)=>'<div class="trainingline"><span>'+safe(label)+'</span><strong class="'+statusClass(entry.status)+'">'+safe(entry.status)+'</strong></div>';
 let entries=headers.map((h,i)=>({h,v:String(p.values[i]??'').trim()})).filter(x=>x.v);
 $('result').innerHTML='<h2 style="font-size:1.25rem">'+safe(p.name)+'</h2><div class="verification"><div class="verdict '+statusClass(t.overall)+'">ESTADO GENERAL: '+safe(t.overall)+'</div>'+tag('Charla ISA',t.isa)+tag('Charla PH',t.ph)+'</div><h3>Datos de la persona</h3>'+entries.map(x=>'<div class="field"><div class="muted" style="font-size:.75rem">'+safe(x.h)+'</div><strong>'+safe(x.v)+'</strong></div>').join('')+(t.general.found?'<p class="hint">El estado general se obtiene de la columna de aprobación de la planilla.</p>':'<p class="hint">Sin columna de aprobación general: el estado se calcula solo si existen las columnas ISA y PH. Datos ausentes se muestran como «Sin información».</p>');}
 
-function lookup(s){s=String(s||'').trim();if(!s)return;if(!records.length){$('result').innerHTML='<strong class="rejected">No hay registros cargados.</strong><p>La sincronización no está disponible; importa el respaldo Excel/CSV/JSON para verificar este QR. No es posible determinar la aprobación sin los datos.</p>';return;}const q=norm(s),k=key(s);const matches=records.filter(p=>key(p.rut)===k||key(p.item)===k);const f=matches.length?matches:records.filter(p=>norm(p.name).includes(q));if(!f.length){$('result').innerHTML='<strong style="color:#b62727">No encontrado:</strong> '+safe(s);return;}if(f.length===1){detail(f[0]);return;}$('result').innerHTML='<p>'+f.length+' personas encontradas. Selecciona una:</p>'+f.slice(0,100).map(p=>'<button class="person" data-index="'+p.index+'">'+safe(p.name)+' <small>'+safe(p.rut||p.item)+'</small></button>').join('');}
+function lookup(s,strict=false){
+ s=String(s||'').trim();if(!s)return;
+ if(!records.length){$('result').innerHTML='<strong class="rejected">No se pueden consultar datos.</strong><p>No existe una planilla sincronizada ni un respaldo cargado.</p>';return;}
+ const qr=parseQrPayload(s),q=norm(s),k=key(s);
+ let matches=[];
+ if(qr.version===2){matches=records.filter(p=>key(qr.type==='RUT'?p.rut:p.item)===qr.value && !!(qr.type==='RUT'?p.rut:p.item));}
+ else{matches=records.filter(p=>(p.rut&&key(p.rut)===k)||(p.item&&key(p.item)===k));}
+ if(!strict&&!matches.length&&qr.version===1)matches=records.filter(p=>norm(p.name).includes(q));
+ if(!matches.length){$('result').innerHTML='<strong class="rejected">QR no encontrado o dato desconocido:</strong> '+safe(s);return;}
+ if(matches.length===1){detail(matches[0]);return;}
+ $('result').innerHTML='<strong class="rejected">Identificador ambiguo: '+matches.length+' registros.</strong><p>Corrige los duplicados en la planilla antes de validar.</p>';
+}
 $('result').onclick=e=>{const b=e.target.closest('[data-index]');if(b){const p=records.find(x=>x.index===Number(b.dataset.index));if(p)detail(p);}};
-$('find').onclick=()=>lookup($('lookup').value);$('lookup').onkeydown=e=>{if(e.key==='Enter')lookup(e.target.value);};
-function onScan(s){const now=Date.now();if(s===seen&&now-seenAt<2500)return;seen=s;seenAt=now;$('lookup').value=s;lookup(s);if(navigator.vibrate)navigator.vibrate(90);}
+async function manualLookup(){const s=$('lookup').value;if(apiConfigured()){if(!await syncData(true)){$('result').textContent='Sin conexión: no se puede verificar el estado actual.';return;}}lookup(s,false);}
+ $('find').onclick=manualLookup;$('lookup').onkeydown=e=>{if(e.key==='Enter')manualLookup();};
+async function onScan(s){
+ const now=Date.now();if(s===seen&&now-seenAt<2500)return;seen=s;seenAt=now;
+ $('lookup').value=s;
+ // Ante fallo de sincronización no afirmar aprobación usando registros anteriores.
+ if(apiConfigured()){
+  $('result').textContent='Verificando datos actualizados…';
+  if(!await syncData(true)){$('result').innerHTML='<strong class="rejected">SIN VERIFICACIÓN</strong><p>No hay conexión al servicio. No se puede confirmar aprobación ISA/PH.</p>';return;}
+ }else if(sourceMode!=='local'){$('result').innerHTML='<strong class="rejected">SIN VERIFICACIÓN</strong><p>Servicio no configurado y sin respaldo local.</p>';return;}
+ lookup(s,true);if(navigator.vibrate)navigator.vibrate(90);
+}
 function cameraHint(err){
  const name=String(err?.name||'');const message=String(err?.message||err||'');
  const policy= document.permissionsPolicy || document.featurePolicy;
@@ -76,4 +145,6 @@ $('open-direct').onclick=()=>{window.open(window.location.href,'_blank','noopene
 $('stop').onclick=async()=>{if(scanner&&isScanning){await scanner.stop();isScanning=false;setStatus('Cámara detenida.');}};
 $('qrfile').onchange=async e=>{const file=e.target.files[0];if(!file)return;if(typeof Html5Qrcode==='undefined')return setStatus('La biblioteca del lector no está disponible.','error');try{if(isScanning){await scanner.stop();isScanning=false;}scanner=scanner||new Html5Qrcode('reader');onScan(await scanner.scanFile(file,true));}catch(err){setStatus('No se pudo leer el QR de la imagen: '+(err.message||err),'error');}};
 initSource();
+setInterval(()=>{if(apiConfigured())syncData(true);},180000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&apiConfigured())syncData(false);});
 </script></body></html>
