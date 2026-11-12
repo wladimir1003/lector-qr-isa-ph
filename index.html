@@ -24,14 +24,45 @@ function parseQrPayload(raw){
 
 let sourceMode="none",lastSync=0,syncPromise=null;
 function csvParse(t){t=String(t).replace(/^\uFEFF/,'');let rows=[],row=[],field='',quote=false;for(let i=0;i<t.length;i++){let c=t[i];if(quote){if(c==='"'&&t[i+1]==='"'){field+='"';i++;}else if(c==='"')quote=false;else field+=c;}else if(c==='"')quote=true;else if(c===','||c===';'&&t.slice(0,t.indexOf('\n')).includes(';')&&!t.slice(0,t.indexOf('\n')).includes(',')){row.push(field);field='';}else if(c==='\n'){row.push(field);rows.push(row);row=[];field='';}else if(c!=='\r')field+=c;}if(field||row.length){row.push(field);rows.push(row);}return rows;}
-function loadRows(rows){rows=rows.filter(r=>r.some(c=>String(c??'').trim()));if(!rows.length)throw Error('La planilla está vacía.');headers=rows.shift().map(s=>String(s??'').trim());const ci=(...names)=>headers.findIndex(h=>names.some(n=>col(h)===col(n)));
-const idx={name:ci('Nombres','Nombre','Primer nombre'),last:ci('Apellidos','Apellido'),rut:ci('RUT','RUN'),item:ci('Item','N° Item','Nº Item','Numero','Número','ID'),job:ci('Cargo'),company:ci('Empresa')};if(idx.name<0&&idx.last<0)throw Error('No existe la columna Nombres o Apellidos. Encabezados detectados: '+headers.join(', '));
-records=rows.map((r,i)=>{const g=j=>j<0?'':String(r[j]??'').trim();const name=[g(idx.name),g(idx.last)].filter(Boolean).join(' ');const rut=g(idx.rut),item=g(idx.item),code=rut||item;return{name,rut,item,code,job:g(idx.job),company:g(idx.company),values:r,index:i+1,search:norm([name,rut,item,g(idx.job),g(idx.company)].join(' '))+' '+key(rut)+' '+key(item)}}).filter(p=>p.name&&p.code);
-if(!records.length)throw Error('La planilla no contiene personas con nombre y RUT o Item.');
- const seenKeys=new Set(),duplicates=[];
- for(const p of records){const id=qrPayload(p);if(seenKeys.has(id))duplicates.push(id);seenKeys.add(id);}
- if(duplicates.length)throw Error('Hay identificadores QR duplicados en la planilla: '+duplicates.slice(0,5).join(', ')+'. Corrige la planilla antes de emitir QR.');
- onDataLoaded();}
+function loadRows(rows){
+ if(!Array.isArray(rows))throw Error('Respuesta inválida: no llegó una tabla de datos.');
+ const all=rows.filter(r=>Array.isArray(r)&&r.some(c=>String(c??'').trim()));
+ if(!all.length)throw Error('La planilla llegó vacía.');
+ const aliases={
+  name:['nombres','nombre','primer nombre','nombre trabajador','nombre completo','trabajador','colaborador','personal','persona','empleado'],
+  last:['apellidos','apellido','apellido paterno'],
+  rut:['rut','run','rut trabajador','rut del trabajador','rut personal','run trabajador','cedula','cedula identidad'],
+  item:['item','n item','numero item','número item','n° item','nº item','id','codigo','codigo trabajador','nro','nro item'],
+  job:['cargo','puesto','funcion','función','ocupacion'],
+  company:['empresa','razon social','razón social','contratista','empleador','subcontratista']
+ };
+ const match=(h,arr)=>arr.some(a=>col(h)===col(a));
+ let best=-1,bestScore=-1;
+ for(let i=0;i<Math.min(all.length,30);i++){
+   const r=all[i].map(x=>String(x??'').trim());
+   const score=Object.values(aliases).reduce((s,a)=>s+(r.some(x=>match(x,a))?1:0),0);
+   if(score>bestScore){bestScore=score;best=i;}
+ }
+ if(bestScore<2)throw Error('No se identificaron los encabezados. Primeras filas: '+all.slice(0,3).map(r=>r.slice(0,8).join(' / ')).join(' | ').slice(0,260));
+ headers=all[best].map(s=>String(s??'').trim());
+ const ci=k=>headers.findIndex(h=>match(h,aliases[k]));
+ const idx={name:ci('name'),last:ci('last'),rut:ci('rut'),item:ci('item'),job:ci('job'),company:ci('company')};
+ if(idx.rut<0&&idx.item<0)throw Error('No existe columna RUT ni Item. Columnas detectadas: '+headers.join(' | '));
+ records=all.slice(best+1).map((r,i)=>{
+  const g=j=>j<0?'':String(r[j]??'').trim();
+  const rut=g(idx.rut),item=g(idx.item),code=rut||item;
+  const name=[g(idx.name),g(idx.last)].filter(Boolean).join(' ') || (code?'Registro '+code:'');
+  const values=headers.map((_,k)=>g(k));
+  const text=norm(values.join(' '));
+  return {name,rut,item,code,job:g(idx.job),company:g(idx.company),values,index:i+1,
+    search:text+' '+key(rut)+' '+key(item)};
+ }).filter(p=>p.code);
+ if(!records.length)throw Error('La planilla no tiene registros con RUT o Item. Columnas: '+headers.join(' | '));
+ const seen=new Set(),dups=[];
+ for(const p of records){const code=qrPayload(p);if(seen.has(code))dups.push(code);seen.add(code);}
+ if(dups.length)throw Error('Existen identificadores duplicados en la planilla: '+dups.slice(0,4).join(', '));
+ onDataLoaded();
+}
 function setStatus(t,kind=''){const e=$('status');e.textContent=t;e.className='status '+kind;const b=$('open-direct');if(b)b.style.display= (kind==='error' && (/iframe|incrustad|página anfitriona|marco|política de permisos/i.test(t)))?'inline-block':'none';}
 async function loadFile(file){if(!file)return;try{setStatus('Leyendo '+file.name+'…');let rows;if(/\.json$/i.test(file.name)){const obj=JSON.parse(await file.text());if(!Array.isArray(obj.headers)||!Array.isArray(obj.rows))throw Error('El JSON no tiene estructura de respaldo QR válida.');rows=[obj.headers,...obj.rows];}else if(/\.csv$/i.test(file.name))rows=csvParse(await file.text());else{if(typeof XLSX==='undefined')throw Error('No se cargó la biblioteca de Excel; usa un archivo CSV o revisa la conexión.');const w=XLSX.read(await file.arrayBuffer(),{type:'array',raw:false});const sheet=w.Sheets[w.SheetNames[0]];rows=XLSX.utils.sheet_to_json(sheet,{header:1,defval:'',raw:false});}sourceMode='local';lastSync=0;loadRows(rows);}catch(e){setStatus('Error de importación: '+e.message,'error');}}
 // Versión independiente: requiere respaldo de datos. No publica ni solicita la nómina en abierto.
@@ -43,10 +74,10 @@ function apiConfigured(){return /^https:\/\/script\.google\.com\/macros\/s\/[^/]
 function fetchRowsJSONP(){return new Promise((resolve,reject)=>{
  const cb='qrEndpointCallback_'+Math.random().toString(36).slice(2,13), sc=document.createElement('script');
  let done=false;
- const timer=setTimeout(()=>finish(Error('Tiempo agotado conectando a Apps Script')),18000);
+ const timer=setTimeout(()=>finish(Error('El servidor no devolvió la respuesta JSONP. Comprueba que Codigo.gs actualizado esté implementado como NUEVA VERSIÓN y permita acceso autorizado.')),18000);
  function finish(err,data){if(done)return;done=true;clearTimeout(timer);sc.remove();delete window[cb];err?reject(err):resolve(data);}
  window[cb]=data=>finish(null,data);
- sc.onerror=()=>finish(Error('El servicio Apps Script no responde. Revisa la implementación y URL /exec.'));
+ sc.onerror=()=>finish(Error('No se pudo cargar el servicio. Comprueba implementación /exec y permisos.'));
  sc.src=API_URL+(API_URL.includes('?')?'&':'?')+'callback='+cb+'&t='+Date.now();
  document.head.appendChild(sc);
 });}
@@ -93,10 +124,11 @@ function lookup(s,strict=false){
  let matches=[];
  if(qr.version===2){matches=records.filter(p=>key(qr.type==='RUT'?p.rut:p.item)===qr.value && !!(qr.type==='RUT'?p.rut:p.item));}
  else{matches=records.filter(p=>(p.rut&&key(p.rut)===k)||(p.item&&key(p.item)===k));}
- if(!strict&&!matches.length&&qr.version===1)matches=records.filter(p=>norm(p.name).includes(q));
+ if(!strict&&!matches.length&&qr.version===1)matches=records.filter(p=>p.search.includes(q) || (k.length>1&&((p.rut&&key(p.rut).includes(k))||(p.item&&key(p.item).includes(k)))));
  if(!matches.length){$('result').innerHTML='<strong class="rejected">QR no encontrado o dato desconocido:</strong> '+safe(s);return;}
  if(matches.length===1){detail(matches[0]);return;}
- $('result').innerHTML='<strong class="rejected">Identificador ambiguo: '+matches.length+' registros.</strong><p>Corrige los duplicados en la planilla antes de validar.</p>';
+ if(!strict&&qr.version===1){$('result').innerHTML='<p>Se encontraron '+matches.length+' personas. Selecciona una:</p>'+matches.slice(0,80).map(p=>'<button type="button" class="secondary" data-index="'+p.index+'">'+safe(p.name)+' · '+safe(p.rut||p.item)+' · '+safe(p.company)+'</button>').join(' ');return;}
+ $('result').innerHTML='<strong class="rejected">QR ambiguo: '+matches.length+' registros con el mismo identificador.</strong>';
 }
 $('result').onclick=e=>{const b=e.target.closest('[data-index]');if(b){const p=records.find(x=>x.index===Number(b.dataset.index));if(p)detail(p);}};
 async function manualLookup(){const s=$('lookup').value;if(apiConfigured()){if(!await syncData(true)){$('result').textContent='Sin conexión: no se puede verificar el estado actual.';return;}}lookup(s,false);}
