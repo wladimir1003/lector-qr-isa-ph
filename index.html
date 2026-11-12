@@ -38,7 +38,7 @@ async function loadFile(file){if(!file)return;try{setStatus('Leyendo '+file.name
 
 // Servicio Apps Script: URL privada de CONFIGURACION en el código, nunca se muestra en pantalla.
 // IMPORTANTE: la opción JSONP requiere que la fuente esté autorizada para publicación.
-const API_URL = 'PEGAR_AQUI_URL_DEL_DESPLIEGUE_APPS_SCRIPT_EXEC';
+const API_URL = 'https://script.google.com/macros/s/AKfycbzpPZ6ItVYyiyOf6uIH_lyU7nW53h_E9whO2lGEZkf-xYXB00iu1r8QwJ0qDX3RCKOAGw/exec';
 function apiConfigured(){return /^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(?:\?.*)?$/.test(API_URL);}
 function fetchRowsJSONP(){return new Promise((resolve,reject)=>{
  const cb='qrEndpointCallback_'+Math.random().toString(36).slice(2,13), sc=document.createElement('script');
