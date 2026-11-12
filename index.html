@@ -58,9 +58,16 @@ function loadRows(rows){
     search:text+' '+key(rut)+' '+key(item)};
  }).filter(p=>p.code);
  if(!records.length)throw Error('La planilla no tiene registros con RUT o Item. Columnas: '+headers.join(' | '));
- const seen=new Set(),dups=[];
- for(const p of records){const code=qrPayload(p);if(seen.has(code))dups.push(code);seen.add(code);}
- if(dups.length)throw Error('Existen identificadores duplicados en la planilla: '+dups.slice(0,4).join(', '));
+  // Mismo RUT en distintas filas: conservar filas, bloquear verificación hasta resolver.
+  const byRut=new Map(), byItem=new Map();
+  for(const p of records){
+    if(p.rut){const k=key(p.rut);if(!byRut.has(k))byRut.set(k,[]);byRut.get(k).push(p);}
+    if(p.item){const k=key(p.item);if(!byItem.has(k))byItem.set(k,[]);byItem.get(k).push(p);}
+  }
+  for(const p of records){
+    p.conflict=Boolean((p.rut&&byRut.get(key(p.rut)).length>1)||(p.item&&byItem.get(key(p.item)).length>1));
+    p.conflictReason=p.conflict?'RUT o ítem repetido. Revisión requerida.':'';
+  }
  onDataLoaded();
 }
 function setStatus(t,kind=''){const e=$('status');e.textContent=t;e.className='status '+kind;const b=$('open-direct');if(b)b.style.display= (kind==='error' && (/iframe|incrustad|página anfitriona|marco|política de permisos/i.test(t)))?'inline-block':'none';}
@@ -93,9 +100,9 @@ async function syncData(force=false){
    if(!Array.isArray(response?.rows))throw Error('El servicio no devolvió filas de planilla.');
    loadRows(response.rows);
    sourceMode='online';lastSync=Date.now();
-   setStatus('Sincronizado: '+records.length+' personas. Última consulta: '+new Date(lastSync).toLocaleTimeString('es-CL')+'.','good');
+   setStatus('Google Sheets: '+records.length+' personas. Leído: '+(response.updated?new Date(response.updated).toLocaleString('es-CL'):new Date(lastSync).toLocaleString('es-CL'))+'. Versión de datos: '+(response.version||'no informada')+'.','good');
    return true;
-  }catch(e){sourceMode='error';lastSync=0;setStatus('No se pudo sincronizar: '+e.message+'. No se puede confirmar aprobación en vivo.','error');return false;}
+  }catch(e){sourceMode='error';lastSync=0;records=[];headers=[];setStatus('No se pudo sincronizar: '+e.message+'. No se puede confirmar aprobación en vivo.','error');return false;}
   finally{syncPromise=null;}
  })();return syncPromise;
 }
@@ -107,13 +114,13 @@ function initSource(){
 function statusText(v){const s=norm(v);if(!s)return 'Sin información';if(/^(si|s|aprobado|aprobada|apto|apta|vigente|realizada|realizado|completada|completado|cumple|ok|true|1|ap)$/.test(s))return 'Aprobado';if(/^(no|n|reprobado|reprobada|no aprobado|no aprobada|pendiente|vencida|vencido|no cumple|incompleta|incompleto|false|0)$/.test(s))return 'No aprobado';return String(v).trim();}
 function statusClass(s){return s==='Aprobado'?'approved':s==='No aprobado'?'rejected':'unknown';}
 function fieldIndex(labels){const h=headers.map(col);for(const label of labels){const pos=h.indexOf(col(label));if(pos>=0)return pos;}return -1;}
-function getTraining(p){const get=(labels)=>{const i=fieldIndex(labels);return {found:i>=0,value:i>=0?String(p.values[i]??'').trim():'',status:i>=0?statusText(p.values[i]):'Sin información'};};const isa=get(['Charla ISA','ISA','Estado ISA','Aprobación ISA','Aprobacion ISA','Inducción ISA','Induccion ISA','Charla de ISA','ISA Aprobada','ISA Aprobado']);const ph=get(['Charla PH','PH','Estado PH','Aprobación PH','Aprobacion PH','Inducción PH','Induccion PH','Charla de PH','PH Aprobada','PH Aprobado']);const general=get(['Aprobado','Aprobación','Aprobacion','Estado de aprobación','Estado de aprobacion','Estado general','Estado','Resultado','Habilitado']);let overall='Sin información';if(general.found){overall=general.status;if(isa.status==='No aprobado'||ph.status==='No aprobado')overall='No aprobado';}else if(isa.found&&ph.found){overall=isa.status==='Aprobado'&&ph.status==='Aprobado'?'Aprobado':isa.status==='No aprobado'||ph.status==='No aprobado'?'No aprobado':'Sin información';}return{isa,ph,general,overall};}
+function getTraining(p){const get=(labels)=>{const i=fieldIndex(labels);return {found:i>=0,value:i>=0?String(p.values[i]??'').trim():'',status:i>=0?statusText(p.values[i]):'Sin información'};};const isa=get(['Charla ISA','ISA','Estado ISA','Aprobación ISA','Aprobacion ISA','Inducción ISA','Induccion ISA','Charla de ISA','ISA Aprobada','ISA Aprobado']);const ph=get(['Charla PH','PH','Estado PH','Aprobación PH','Aprobacion PH','Inducción PH','Induccion PH','Charla de PH','PH Aprobada','PH Aprobado']);const general=get(['Aprobado','Aprobación','Aprobacion','Estado de aprobación','Estado de aprobacion','Estado general','Estado','Estatus','Resultado','Habilitado']);let overall='Sin información';if(general.found){overall=general.status;if(isa.status==='No aprobado'||ph.status==='No aprobado')overall='No aprobado';}else if(isa.found&&ph.found){overall=isa.status==='Aprobado'&&ph.status==='Aprobado'?'Aprobado':isa.status==='No aprobado'||ph.status==='No aprobado'?'No aprobado':'Sin información';}return{isa,ph,general,overall};}
 function downloadBlob(blob,name){const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),15000);}
 
 
 let scanner=null,isScanning=false,seen='',seenAt=0;
-function onDataLoaded(){setStatus(records.length+' personas disponibles. '+(sourceMode==='local'?'RESPALDO LOCAL: puede estar desactualizado.':'Datos cargados; verificar origen.'),'good');}
-function detail(p){const t=getTraining(p);const tag=(label,entry)=>'<div class="trainingline"><span>'+safe(label)+'</span><strong class="'+statusClass(entry.status)+'">'+safe(entry.status)+'</strong></div>';
+function onDataLoaded(){setStatus(records.length+' registros disponibles; '+records.filter(p=>p.conflict).length+' en revisión por duplicación. '+(sourceMode==='local'?'RESPALDO LOCAL: puede estar desactualizado.':'Datos cargados; verificar origen.'),'good');}
+function detail(p){const t=getTraining(p);if(p.conflict){$('result').innerHTML='<strong class="rejected">REVISIÓN REQUERIDA</strong><p>RUT o ítem repetido en Hoja1. No se puede confirmar la aprobación ISA/PH de este registro hasta resolver la duplicación.</p><p>'+safe(p.name)+' · '+safe(p.rut)+' · Ítem '+safe(p.item)+'</p>';return;}const tag=(label,entry)=>'<div class="trainingline"><span>'+safe(label)+'</span><strong class="'+statusClass(entry.status)+'">'+safe(entry.status)+'</strong></div>';
 let entries=headers.map((h,i)=>({h,v:String(p.values[i]??'').trim()})).filter(x=>x.v);
 $('result').innerHTML='<h2 style="font-size:1.25rem">'+safe(p.name)+'</h2><div class="verification"><div class="verdict '+statusClass(t.overall)+'">ESTADO GENERAL: '+safe(t.overall)+'</div>'+tag('Charla ISA',t.isa)+tag('Charla PH',t.ph)+'</div><h3>Datos de la persona</h3>'+entries.map(x=>'<div class="field"><div class="muted" style="font-size:.75rem">'+safe(x.h)+'</div><strong>'+safe(x.v)+'</strong></div>').join('')+(t.general.found?'<p class="hint">El estado general se obtiene de la columna de aprobación de la planilla.</p>':'<p class="hint">Sin columna de aprobación general: el estado se calcula solo si existen las columnas ISA y PH. Datos ausentes se muestran como «Sin información».</p>');}
 
